@@ -1,196 +1,113 @@
-function Messenger(win) {
-    // save the pointer to the window which is interacting with
-    this.win = win;
-    this.init();
-}
+/**
+ *     __  ___                                                 
+ *    /  |/  /___   _____ _____ ___   ____   ____ _ ___   _____
+ *   / /|_/ // _ \ / ___// ___// _ \ / __ \ / __ `// _ \ / ___/
+ *  / /  / //  __/(__  )(__  )/  __// / / // /_/ //  __// /    
+ * /_/  /_/ \___//____//____/ \___//_/ /_/ \__, / \___//_/     
+ *                                        /____/               
+ * 
+ * @description MessengerJS, a common cross-document communicate solution.
+ * @author biqing kwok
+ * @version 2.0
+ * @license release under MIT license
+ */
 
-// postMessage API is supported
-Messenger.prototype.init = function () {
-    var self = this;
-    var receiver = function (event) {
-        // Some IE-component browsers fails if you compare
-        // window objects with '===' or '!=='.
-        if (event.source != self.win) return;
-        (self.onmessage || function () {}).call(self, event.data);
-    };
-    if (window.addEventListener)
-        window.addEventListener('message', receiver, false);
-    else if (window.attachEvent)
-        window.attachEvent('onmessage', receiver);
-};
+window.Messenger = (function(){
 
-Messenger.prototype.send = function (data) {
-    this.win.postMessage(data, '*');
-};
+    // 消息前缀, 建议使用自己的项目名, 避免多项目之间的冲突
+    var prefix = "[PROJECT_NAME]",
+        supportPostMessage = 'postMessage' in window;
 
-Messenger.initInParent = function (frame) {
-    return new this(frame.contentWindow);
-};
-
-Messenger.initInIframe = function () {
-    return new this(window.parent);
-};
-
-// in IE, postMessage API is not supported
-if (!window.postMessage && window.attachEvent) {
-    // redefine the init method
-    Messenger.prototype.init = function () {
-        var isSameOrigin = false;
-        // test if the two document is same origin
-        try {
-            isSameOrigin = !!this.win.location.href;
-        } catch (ex) {}
-        if (isSameOrigin) {
-            this.send = this.sendForSameOrigin;
-            this.initForSameOrigin();
-            return;
+    // Target 类, 消息对象
+    function Target(target, name){
+        var errMsg = '';
+        if(arguments.length < 2){
+            errMsg = 'target error - target and name are both requied';
+        } else if (typeof target != 'object'){
+            errMsg = 'target error - target itself must be window object';
+        } else if (typeof name != 'string'){
+            errMsg = 'target error - target name must be string type';
         }
+        if(errMsg){
+            throw new Error(errMsg);
+        }
+        this.target = target;
+        this.name = name;
+    }
 
-        // different origin case
-        // init the message queue, which can guarantee the messages won't be lost
-        this.queue = [];
-        if (window.parent == this.win) {
-            this.initForParent();
+    // 往 target 发送消息, 出于安全考虑, 发送消息会带上前缀
+    if ( supportPostMessage ){
+        // IE8+ 以及现代浏览器支持
+        Target.prototype.send = function(msg){
+            this.target.postMessage(prefix + msg, '*');
+        };
+    } else {
+        // 兼容IE 6/7
+        Target.prototype.send = function(msg){
+            var targetFunc = window.navigator[prefix + this.name];
+            if ( typeof targetFunc == 'function' ) {
+                targetFunc(prefix + msg, window);
+            } else {
+                throw new Error("target callback function is not defined");
+            }
+        };
+    }
+   
+    // 信使类
+    function Messenger(name){
+        this.targets = {};
+        this.name = name;
+        this.listenFunc = [];
+        this.initListen();
+    }
+
+    // 添加一个消息对象
+    Messenger.prototype.addTarget = function(target, name){
+        var targetObj = new Target(target, name);
+        this.targets[name] = targetObj;
+    };
+
+    // 初始化消息监听
+    Messenger.prototype.initListen = function(){
+        var self = this;
+        var generalCallback = function(msg){
+            if(typeof msg == 'object' && msg.data){
+                msg = msg.data;
+            }
+            // 剥离消息前缀
+            msg = msg.slice(prefix.length);
+            for(var i = 0; i < self.listenFunc.length; i++){
+                self.listenFunc[i](msg);
+            }
+        };
+
+        if ( supportPostMessage ){
+            if ( 'addEventListener' in document ) {
+                window.addEventListener('message', generalCallback, false);
+            } else if ( 'attachEvent' in document ) {
+                window.attachEvent('onmessage', generalCallback);
+            }
         } else {
-            this.initForFrame();
+            // 兼容IE 6/7
+            window.navigator[prefix + this.name] = generalCallback;
         }
     };
 
-    Messenger.prototype.initForSameOrigin = function () {
-        var self = this;
-        document.attachEvent('ondataavailable', function (event) {
-            if (!event.eventType ||
-                event.eventType !== 'message' ||
-                event.eventSource != self.win)
-                return;
-            (self.onmessage || function () {}).call(self, event.eventData);
-        });
+    // 监听消息
+    Messenger.prototype.listen = function(callback){
+        this.listenFunc.push(callback);
     };
 
-    Messenger.prototype.sendForSameOrigin = function (data) {
-        var self = this;
-        setTimeout(function () {
-            var event = self.win.document.createEventObject();
-            event.eventType = 'message';
-            event.eventSource = window;
-            event.eventData = data;
-            self.win.document.fireEvent('ondataavailable', event);
-        });
-    };
-
-    // create two iframe in iframe page
-    Messenger.prototype.initForParent = function () {
-        var fragment = document.createDocumentFragment();
-        var style = 'width: 1px; height: 1px; position: absolute; left: -999px; top: -999px;';
-        var senderFrame = document.createElement('iframe');
-        senderFrame.style.cssText = style;
-        fragment.appendChild(senderFrame);
-        var receiverFrame = document.createElement('iframe');
-        receiverFrame.style.cssText = style;
-        fragment.appendChild(receiverFrame);
-
-        document.body.insertBefore(fragment, document.body.firstChild);
-        this.senderWin = senderFrame.contentWindow;
-        this.receiverWin = receiverFrame.contentWindow;
-
-        this.startReceive();
-    };
-
-    // parent page wait the messenger iframe is ready
-    Messenger.prototype.initForFrame = function () {
-        this.senderWin = null;
-        this.receiverWin = null;
-
-        var self = this;
-        this.timerId = setInterval(function () {
-            self.waitForFrame();
-        }, 50);
-    };
-
-    // parent page polling the messenger iframe
-    // when all is ready, start trying to receive message
-    Messenger.prototype.waitForFrame = function () {
-        var senderWin;
-        var receiverWin;
-        try {
-            senderWin = this.win[1];
-            receiverWin = this.win[0];
-        } catch (ex) {}
-        if (!senderWin || !receiverWin) return;
-        clearInterval(this.timerId);
-
-        this.senderWin = senderWin;
-        this.receiverWin = receiverWin;
-        if (this.queue.length)
-            this.flush();
-        this.startReceive();
-    };
-
-    // polling the messenger iframe's window.name
-    Messenger.prototype.startReceive = function () {
-        var self = this;
-        this.timerId = setInterval(function () {
-            self.tryReceive();
-        }, 50);
-    };
-
-    Messenger.prototype.tryReceive = function () {
-        try {
-            // If we can access name, we have already got the data.
-            this.receiverWin.name;
-            return;
-        } catch (ex) {}
-
-        // if the name property can not be accessed, try to change the messenger iframe's location to 'about blank'
-        this.receiverWin.location.replace('about:blank');
-        // We have to delay receiving to avoid access-denied error.
-        var self = this;
-        setTimeout(function () {
-            self.receive();
-        }, 0);
-    };
-
-    // recieve and parse the data, call the listener function
-    Messenger.prototype.receive = function () {
-        var rawData = null;
-        try {
-            rawData = this.receiverWin.name;
-        } catch (ex) {}
-        if (!rawData) return;
-        this.receiverWin.name = '';
-
-        var self = this;
-        var dataList = rawData.substring(1).split('|');
-        for (var i = 0; i < dataList.length; i++) (function () {
-            var data = decodeURIComponent(dataList[i]);
-            setTimeout(function () {
-                (self.onmessage || function () {}).call(self, data);
-            }, 0);
-        })();
-    };
-
-    // send data via push the data into the message queue
-    Messenger.prototype.send = function (data) {
-        this.queue.push(data);
-        if (!this.senderWin) return;
-        this.flush();
-    };
-
-    Messenger.prototype.flush = function () {
-        var dataList = [];
-        for (var i = 0; i < this.queue.length; i++)
-            dataList[i] = encodeURIComponent(this.queue[i]);
-        var encodedData = '|' + dataList.join('|');
-        try {
-            this.senderWin.name += encodedData;
-            this.queue.length = 0;
-        } catch (ex) {
-            this.senderWin.location.replace('about:blank');
-            var self = this;
-            setTimeout(function () {
-                self.flush();
-            }, 0);
+    // 广播消息
+    Messenger.prototype.send = function(msg){
+        var targets = this.targets,
+            target;
+        for(target in targets){
+            if(targets.hasOwnProperty(target)){
+                targets[target].send(msg);
+            }
         }
     };
 
-}
+    return Messenger;
+})();
